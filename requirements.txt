@@ -1,0 +1,16 @@
+torch
+transformers
+datasets
+peft
+trl
+bitsandbytes
+accelerate
+evaluate
+rouge_score
+bert_score
+wandb
+openai
+pyyaml
+python-dotenv
+pandas
+scipy

@@ -1,0 +1,13 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+outputs/
+faiss_index/
+faiss_edu_index/
+*.db
+student_schedules.json
+evaluation_results.csv
+knowledge_base.txt
+curriculum_data.txt
