@@ -1,13 +1,26 @@
+# Environment files — NEVER commit real API keys
 .env
+*.env
+
+# Python
 __pycache__/
 *.pyc
+*.pyo
+*.egg-info/
 .venv/
 venv/
+env/
+
+# Model artifacts (large files)
 outputs/
 faiss_index/
 faiss_edu_index/
+*.safetensors
+
+# Database and runtime files
 *.db
 student_schedules.json
 evaluation_results.csv
 knowledge_base.txt
 curriculum_data.txt
+

@@ -6,7 +6,7 @@ Resume claim: Benchmarked SFT, LoRA (r=16), QLoRA (4-bit), DPO; DPO achieved 73%
 import os
 import json
 import yaml
-import openai
+import google.generativeai as genai
 import evaluate as hf_evaluate
 import pandas as pd
 from datasets import load_dataset
@@ -17,8 +17,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+genai.configure(api_key=GOOGLE_API_KEY)
+gemini_model = genai.GenerativeModel("gemini-2.0-flash")
 
 def load_config():
     with open("configs/training_config.yaml", "r") as f:
@@ -46,14 +47,14 @@ def compute_bert_score(predictions: list[str], references: list[str]) -> float:
     return F1.mean().item()
 
 def llm_as_judge_win_rate(prompts: list[str], base_responses: list[str], model_responses: list[str]) -> float:
-    """Use GPT-4o to judge which response is better: base or fine-tuned."""
+    """Use Gemini to judge which response is better: base or fine-tuned."""
     wins = 0
     for prompt, base_resp, model_resp in tqdm(
-        zip(prompts, base_responses, model_responses), 
-        desc="LLM-as-judge evaluation",
+        zip(prompts, base_responses, model_responses),
+        desc="LLM-as-judge evaluation (Gemini)",
         total=len(prompts)
     ):
-        judge_prompt = f"""You are an objective evaluator. Given a prompt and two responses, 
+        judge_prompt = f"""You are an objective evaluator. Given a prompt and two responses,
 decide which response is better (more helpful, accurate, and well-written).
 
 Prompt: {prompt}
@@ -63,20 +64,15 @@ Response A: {base_resp}
 Response B: {model_resp}
 
 Which is better? Reply with ONLY 'A' or 'B'."""
-        
+
         try:
-            completion = openai_client.chat.completions.create(
-                model="gpt-4o",
-                messages=[{"role": "user", "content": judge_prompt}],
-                max_tokens=5,
-                temperature=0,
-            )
-            verdict = completion.choices[0].message.content.strip().upper()
+            response = gemini_model.generate_content(judge_prompt)
+            verdict = response.text.strip().upper()
             if "B" in verdict:
                 wins += 1
         except Exception as e:
             print(f"Judge error: {e}")
-    
+
     return wins / len(prompts) if prompts else 0.0
 
 def main():
