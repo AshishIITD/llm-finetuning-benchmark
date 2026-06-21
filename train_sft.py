@@ -1,91 +1,91 @@
 """
-train_sft.py — Full SFT (Supervised Fine-Tuning) on Llama 3.1 8B using TRL SFTTrainer.
-Resume claim: SFT ROUGE-L=0.378, BERTScore F1=0.863, Win Rate=67%, GPU Memory=38GB
+Full SFT (Supervised Fine-Tuning) — no LoRA, all weights updated.
+Use this as the baseline and as the starting point for DPO.
+Requires ~38GB GPU. Use train_lora.py for lower memory options.
 """
-import os
 import yaml
-import wandb
-from datasets import load_dataset
-from transformers import AutoTokenizer, AutoModelForCausalLM, TrainingArguments
+import torch
+from pathlib import Path
+from datasets import load_from_disk
+from transformers import AutoTokenizer, AutoModelForCausalLM
 from trl import SFTTrainer, SFTConfig
-from dotenv import load_dotenv
+import wandb
+from loguru import logger
 
-load_dotenv()
 
-def load_config():
-    with open("configs/training_config.yaml", "r") as f:
+def load_config(path: str = "configs/sft_config.yaml") -> dict:
+    with open(path) as f:
         return yaml.safe_load(f)
 
-def format_prompt(example):
-    instruction = example.get("instruction", "")
-    input_text = example.get("input", "")
-    output = example.get("output", "")
-    if input_text:
-        prompt = f"### Instruction:\n{instruction}\n\n### Input:\n{input_text}\n\n### Response:\n{output}"
-    else:
-        prompt = f"### Instruction:\n{instruction}\n\n### Response:\n{output}"
-    return {"text": prompt}
 
 def main():
-    config = load_config()
-    sft_cfg = config["sft"]
-    base_model = config["base_model"]
+    cfg = load_config()
+    logger.info(f"Starting full SFT: {cfg['model']['base_model']}")
 
-    # Initialize W&B run
     wandb.init(
-        project="llm-finetuning-benchmark",
-        name="sft-llama3-8b",
-        config=sft_cfg,
-        tags=["sft", "llama3"]
+        project=cfg["wandb"]["project"],
+        name=cfg["wandb"]["run_name"],
+        tags=cfg["wandb"]["tags"],
     )
 
-    print(f"Loading tokenizer and model: {base_model}")
-    tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(cfg["model"]["base_model"], trust_remote_code=True)
     tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "right"
 
     model = AutoModelForCausalLM.from_pretrained(
-        base_model,
+        cfg["model"]["base_model"],
+        torch_dtype=torch.bfloat16,
         device_map="auto",
-        torch_dtype="auto",
+        trust_remote_code=True,
     )
 
-    print("Loading and formatting dataset...")
-    dataset = load_dataset("tatsu-lab/alpaca", split="train[:90%]")
-    eval_dataset = load_dataset("tatsu-lab/alpaca", split="train[90%:]")
-    dataset = dataset.map(format_prompt)
-    eval_dataset = eval_dataset.map(format_prompt)
+    # Count parameters
+    total_params = sum(p.numel() for p in model.parameters())
+    logger.info(f"Total parameters: {total_params / 1e9:.2f}B")
 
+    train_ds = load_from_disk("./data/sft_train")
+    eval_ds = load_from_disk("./data/sft_eval")
+
+    t = cfg["training"]
     training_args = SFTConfig(
-        output_dir=f"{config['output_dir']}/sft",
-        num_train_epochs=sft_cfg["num_train_epochs"],
-        per_device_train_batch_size=sft_cfg["per_device_train_batch_size"],
-        gradient_accumulation_steps=sft_cfg["gradient_accumulation_steps"],
-        learning_rate=sft_cfg["learning_rate"],
-        warmup_ratio=sft_cfg["warmup_ratio"],
-        logging_steps=sft_cfg["logging_steps"],
-        save_strategy="epoch",
+        output_dir=t["output_dir"],
+        num_train_epochs=t["num_train_epochs"],
+        per_device_train_batch_size=t["per_device_train_batch_size"],
+        gradient_accumulation_steps=t["gradient_accumulation_steps"],
+        learning_rate=t["learning_rate"],
+        lr_scheduler_type=t["lr_scheduler_type"],
+        warmup_ratio=t["warmup_ratio"],
+        weight_decay=t["weight_decay"],
+        max_seq_length=t["max_seq_length"],
+        bf16=t["bf16"],
+        logging_steps=t["logging_steps"],
+        eval_steps=t["eval_steps"],
+        save_steps=t["save_steps"],
+        load_best_model_at_end=t["load_best_model_at_end"],
+        metric_for_best_model=t["metric_for_best_model"],
         report_to="wandb",
-        max_seq_length=sft_cfg["max_seq_length"],
+        dataset_text_field="text",
     )
 
     trainer = SFTTrainer(
         model=model,
         args=training_args,
-        train_dataset=dataset,
-        eval_dataset=eval_dataset,
-        processing_class=tokenizer,
+        train_dataset=train_ds,
+        eval_dataset=eval_ds,
+        tokenizer=tokenizer,
     )
 
-    print("Starting SFT training...")
     trainer.train()
-    trainer.save_model(f"{config['output_dir']}/sft-final")
+    out_dir = Path(t["output_dir"])
+    trainer.save_model(str(out_dir))
+    tokenizer.save_pretrained(str(out_dir))
+    logger.info(f"SFT model saved to {out_dir}")
 
-    # Push to Hub
-    if config.get("hub_repo"):
-        trainer.push_to_hub(config["hub_repo"] + "-sft")
+    if cfg["hub"]["push_to_hub"]:
+        trainer.push_to_hub(cfg["hub"]["hub_model_id"])
 
     wandb.finish()
-    print("SFT Training complete!")
+
 
 if __name__ == "__main__":
     main()

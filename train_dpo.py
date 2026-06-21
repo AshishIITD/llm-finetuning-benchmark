@@ -1,104 +1,118 @@
 """
-train_dpo.py — DPO (Direct Preference Optimization) on Llama 3.1 8B using TRL DPOTrainer.
-Resume claim: DPO achieves highest win rate (73%) vs base model using GPT-4o as judge.
+DPO (Direct Preference Optimization) fine-tuning using TRL DPOTrainer.
+Starts from an SFT checkpoint and trains on chosen/rejected preference pairs.
 """
-import os
 import yaml
-import wandb
-from datasets import load_dataset, Dataset
+import torch
+from pathlib import Path
+from datasets import load_from_disk
 from transformers import AutoTokenizer, AutoModelForCausalLM
+from peft import LoraConfig, get_peft_model, TaskType
 from trl import DPOTrainer, DPOConfig
-from dotenv import load_dotenv
+import wandb
+from loguru import logger
 
-load_dotenv()
 
-def load_config():
-    with open("configs/training_config.yaml", "r") as f:
+def load_config(path: str = "configs/dpo_config.yaml") -> dict:
+    with open(path) as f:
         return yaml.safe_load(f)
 
-def prepare_dpo_dataset(tokenizer):
-    """
-    DPO requires a dataset with 'prompt', 'chosen', and 'rejected' fields.
-    We use the HH-RLHF preference dataset from Anthropic as it has this format.
-    """
-    raw = load_dataset("Anthropic/hh-rlhf", split="train[:5000]")
-
-    def extract_preference(example):
-        return {
-            "prompt": "Human: " + example["chosen"].split("Human: ")[1].split("Assistant:")[0].strip(),
-            "chosen": "Assistant: " + example["chosen"].split("Assistant:")[-1].strip(),
-            "rejected": "Assistant: " + example["rejected"].split("Assistant:")[-1].strip(),
-        }
-
-    dataset = raw.map(extract_preference, remove_columns=raw.column_names)
-    return dataset.train_test_split(test_size=0.1)
 
 def main():
-    config = load_config()
-    dpo_cfg = config["dpo"]
-    base_model = config["base_model"]
+    cfg = load_config()
+    logger.info(f"Starting DPO training from: {cfg['model']['base_model']}")
 
     wandb.init(
-        project="llm-finetuning-benchmark",
-        name="dpo-llama3-8b",
-        config=dpo_cfg,
-        tags=["dpo", "rlhf", "llama3", "preference"]
+        project=cfg["wandb"]["project"],
+        name=cfg["wandb"]["run_name"],
+        tags=cfg["wandb"]["tags"],
     )
 
-    print(f"Loading tokenizer and model: {base_model}")
-    tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
-    tokenizer.pad_token = tokenizer.eos_token
+    # Tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(cfg["model"]["base_model"], trust_remote_code=True)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "left"  # DPO requires left padding
 
+    # Policy model (to be optimized)
     model = AutoModelForCausalLM.from_pretrained(
-        base_model,
+        cfg["model"]["base_model"],
+        torch_dtype=torch.bfloat16,
         device_map="auto",
-        torch_dtype="auto",
+        trust_remote_code=True,
     )
 
-    # Reference model (frozen copy of the base model for KL divergence)
+    # Reference model (frozen copy — DPO KL penalty)
     ref_model = AutoModelForCausalLM.from_pretrained(
-        base_model,
+        cfg["model"]["base_model"],
+        torch_dtype=torch.bfloat16,
         device_map="auto",
-        torch_dtype="auto",
+        trust_remote_code=True,
     )
 
-    print("Preparing DPO preference dataset...")
-    splits = prepare_dpo_dataset(tokenizer)
-    train_dataset = splits["train"]
-    eval_dataset = splits["test"]
+    # Apply LoRA to policy model only
+    lora_cfg = cfg["lora"]
+    peft_config = LoraConfig(
+        r=lora_cfg["r"],
+        lora_alpha=lora_cfg["lora_alpha"],
+        target_modules=lora_cfg["target_modules"],
+        lora_dropout=lora_cfg["lora_dropout"],
+        bias=lora_cfg["bias"],
+        task_type=TaskType.CAUSAL_LM,
+    )
+    model = get_peft_model(model, peft_config)
+    model.print_trainable_parameters()
 
+    # Data
+    train_ds = load_from_disk("./data/dpo_train")
+    eval_ds = load_from_disk("./data/dpo_eval")
+    logger.info(f"DPO Train: {len(train_ds)} | Eval: {len(eval_ds)}")
+
+    # DPO Training args
+    t = cfg["training"]
+    d = cfg["dpo"]
     training_args = DPOConfig(
-        output_dir=f"{config['output_dir']}/dpo",
-        beta=dpo_cfg["beta"],
-        num_train_epochs=dpo_cfg["num_train_epochs"],
-        per_device_train_batch_size=dpo_cfg["per_device_train_batch_size"],
-        gradient_accumulation_steps=dpo_cfg["gradient_accumulation_steps"],
-        learning_rate=dpo_cfg["learning_rate"],
-        logging_steps=10,
-        save_strategy="epoch",
+        output_dir=t["output_dir"],
+        num_train_epochs=t["num_train_epochs"],
+        per_device_train_batch_size=t["per_device_train_batch_size"],
+        gradient_accumulation_steps=t["gradient_accumulation_steps"],
+        learning_rate=t["learning_rate"],
+        lr_scheduler_type=t["lr_scheduler_type"],
+        warmup_ratio=t["warmup_ratio"],
+        bf16=t["bf16"],
+        logging_steps=t["logging_steps"],
+        eval_steps=t["eval_steps"],
+        save_steps=t["save_steps"],
+        beta=d["beta"],
+        loss_type=d["loss_type"],
+        max_prompt_length=d["max_prompt_length"],
+        max_length=d["max_length"],
+        label_smoothing=d["label_smoothing"],
         report_to="wandb",
-        max_length=dpo_cfg["max_length"],
-        max_prompt_length=dpo_cfg["max_prompt_length"],
     )
 
     trainer = DPOTrainer(
         model=model,
         ref_model=ref_model,
         args=training_args,
-        train_dataset=train_dataset,
-        eval_dataset=eval_dataset,
-        processing_class=tokenizer,
+        train_dataset=train_ds,
+        eval_dataset=eval_ds,
+        tokenizer=tokenizer,
     )
 
-    print("Starting DPO training...")
+    logger.info("Starting DPO training...")
     trainer.train()
-    trainer.save_model(f"{config['output_dir']}/dpo-final")
 
-    if config.get("hub_repo"):
-        trainer.push_to_hub(config["hub_repo"] + "-dpo")
+    out_dir = Path(t["output_dir"])
+    trainer.save_model(str(out_dir))
+    tokenizer.save_pretrained(str(out_dir))
+    logger.info(f"DPO model saved to {out_dir}")
+
+    if cfg["hub"]["push_to_hub"]:
+        trainer.push_to_hub(cfg["hub"]["hub_model_id"])
 
     wandb.finish()
-    print("DPO Training complete!")
+
 
 if __name__ == "__main__":
     main()
