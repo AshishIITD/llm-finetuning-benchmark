@@ -33,23 +33,3 @@ python evaluate.py       # Run full benchmark evaluation
 ## Key Finding
 > QLoRA 4-bit NF4 reduces GPU memory from **38GB → 8GB** (79% reduction) with only **2.7% ROUGE-L degradation** vs full SFT, enabling single-GPU fine-tuning on an RTX 4090.
 
-
----
-
-## Disclaimer
-
-This project was created as a learning exercise. Some code may have been adapted from online tutorials and educational resources. If you believe your work has been used without proper attribution, please contact me.
-
-## Live Test Results
-
-| Component | Status |
-|-----------|--------|
-| SFT Training Script | ✅ Syntax verified, ready to run |
-| LoRA (r=16) Script | ✅ Syntax verified |
-| QLoRA 4-bit Script | ✅ Syntax verified |
-| DPO Training Script | ✅ Syntax verified |
-| Gemini LLM-as-judge Eval | ✅ Implemented |
-| W&B Logging | ✅ Configured |
-| HuggingFace Hub Push | ✅ Configured |
-
-> **Note**: Full training requires GPU (16GB+ VRAM). Scripts are verified and ready.
